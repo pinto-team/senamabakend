@@ -132,10 +132,33 @@ def delete_partner(partner_id: str):
 
     return api_success(True, "Deleted")
 
-
 # ---------------------
 # FULL TEXT SEARCH + PAGINATION
 # ---------------------
+
+# اگر /search بدون / آمد → ریدایرکت شود به /search/
+@router.get("/search", include_in_schema=False)
+def redirect_search(
+    q: Optional[str] = None,
+    business_type: Optional[str] = None,
+    funnel_stage: Optional[str] = None,
+    customer_level: Optional[str] = None,
+    page: int = 1,
+    limit: int = 20
+):
+    from fastapi.responses import RedirectResponse
+
+    params = []
+    if q: params.append(f"q={q}")
+    if business_type: params.append(f"business_type={business_type}")
+    if funnel_stage: params.append(f"funnel_stage={funnel_stage}")
+    if customer_level: params.append(f"customer_level={customer_level}")
+    params.append(f"page={page}")
+    params.append(f"limit={limit}")
+
+    qs = "&".join(params)
+    return RedirectResponse(f"/crm-api/partners/search/?{qs}", status_code=307)
+
 
 @router.get("/search/", response_model=None)
 def search_partners(
@@ -148,10 +171,8 @@ def search_partners(
 ):
     query = {}
 
-    # full-text
     if q:
-        q = q.strip()
-        query["$text"] = {"$search": q}
+        query["$text"] = {"$search": q.strip()}
 
     if business_type:
         query["business_type"] = business_type
@@ -163,22 +184,18 @@ def search_partners(
         query["customer_level"] = customer_level
 
     skip = (page - 1) * limit
-
-    # Total count
     total = partners_collection.count_documents(query)
 
-    # FullText sort by score
+    # fulltext score ranking
     if q:
         cursor = partners_collection.find(query, {"score": {"$meta": "textScore"}})
         cursor = cursor.sort([("score", {"$meta": "textScore"})])
     else:
         cursor = partners_collection.find(query)
 
-    # paging
     cursor = cursor.skip(skip).limit(limit)
 
     partners = [bp_from_mongo(d) for d in cursor]
-
     pagination = build_pagination(page, limit, total)
 
     return api_success(partners, "Search results", pagination=pagination)
