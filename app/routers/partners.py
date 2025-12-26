@@ -1,201 +1,280 @@
-from fastapi import APIRouter, HTTPException, Query
-from typing import Optional
+from fastapi import APIRouter, Query
 
-from app.database.mongo import partners_collection
-from app.schemas.business_partner import BusinessPartner
-from app.utils.helpers import bp_from_mongo, object_id_or_400
+from app.utils.helpers import object_id_or_400
 from app.utils.response import api_success, api_error, build_pagination
+
+from app.schemas.partner_quick_entry import PartnerQuickEntry
+from app.schemas.partner_relationship import PartnerRelationshipUpdate
+from app.schemas.partner_analysis import PartnerAnalysisUpdate
+from app.schemas.partner_financial_estimation import PartnerFinancialEstimationUpdate
+from app.schemas.partner_acquisition import PartnerAcquisitionUpdate
+
+from app.models.partner import Partner, Identity, Relationship, Analysis
+from app.repositories.partner_repository import PartnerRepository
+
 
 router = APIRouter(
     prefix="/partners",
-    tags=["Business Partners"]
+    tags=["Partners"]
 )
 
 
-# ---------------------
-# CREATE
-# ---------------------
+# --------------------------------------------------
+# Quick Entry
+# --------------------------------------------------
 
-@router.post("", response_model=None)
-def create_partner(partner: BusinessPartner):
-    data = partner.dict(exclude={"id", "avg_transaction_value"})
+@router.post("/quick-entry")
+def quick_entry(payload: PartnerQuickEntry):
+    """
+    ورود سریع مخاطب (کارت ویزیت / اکسل / لید)
+    فقط brand_name اجباری است
+    """
 
-    # auto compute avg
-    if data.get("transaction_count", 0) > 0:
-        data["avg_transaction_value"] = data["total_transaction_amount"] / max(data["transaction_count"], 1)
-    else:
-        data["avg_transaction_value"] = 0
+    partner = Partner(
+        identity=Identity(
+            brand_name=payload.brand_name,                 # ✅ تنها الزام
+            manager_full_name=payload.manager_full_name,
+            business_type=payload.business_type,
 
-    result = partners_collection.insert_one(data)
-    new_doc = partners_collection.find_one({"_id": result.inserted_id})
+            # ⬇️ مهم: هیچ چیز اجباری نیست
+            contact_numbers=payload.contact_numbers or [],
+            social_links=[],  # quick-entry اصلاً شبکه اجتماعی نمی‌خواهد
 
-    return api_success(bp_from_mongo(new_doc), message="Partner created")
+            province=payload.province,
+            city=payload.city,
+            full_address=None,
+            location=payload.location,
+        ),
+        relationship=Relationship(
+            notes=payload.notes
+        ),
+        analysis=Analysis()  # funnel_stage = prospect
+    )
 
+    repo = PartnerRepository()
+    created = repo.create(partner)
 
+    return api_success(created, "Partner created")
 
-# ---------------------
-# LIST + PAGINATION
-# ---------------------
-
-@router.get("", response_model=None)
-def list_partners(
-    page: int = Query(1, ge=1),
-    limit: int = Query(20, ge=1, le=100),
-    business_type: Optional[str] = None,
-    customer_level: Optional[str] = None,
-    funnel_stage: Optional[str] = None,
-    credit_status: Optional[str] = None,
-    potential: Optional[str] = None,
-    payment_type: Optional[str] = None,
-):
-    skip = (page - 1) * limit
-
-    # داینامیک query builder
-    query = {}
-
-    if business_type:
-        query["business_type"] = business_type
-
-    if customer_level:
-        query["customer_level"] = customer_level
-
-    if funnel_stage:
-        query["funnel_stage"] = funnel_stage
-
-    if credit_status:
-        query["credit_status"] = credit_status
-
-    if potential:
-        query["potential"] = potential
-
-    if payment_type:
-        query["payment_type"] = payment_type
-
-    total = partners_collection.count_documents(query)
-    cursor = partners_collection.find(query).skip(skip).limit(limit)
-    partners = [bp_from_mongo(d) for d in cursor]
-    pagination = build_pagination(page, limit, total)
-    return api_success(partners, "List of partners", pagination=pagination)
-
-# ---------------------
-# GET ONE
-# ---------------------
-
-@router.get("/{partner_id}", response_model=None)
+# --------------------------------------------------
+# Get Partner
+# --------------------------------------------------
+@router.get("/{partner_id}")
 def get_partner(partner_id: str):
-    oid = object_id_or_400(partner_id)
-
-    doc = partners_collection.find_one({"_id": oid})
-    if not doc:
-        return api_error("Partner not found", "404")
-
-    return api_success(bp_from_mongo(doc))
-
-
-# ---------------------
-# UPDATE
-# ---------------------
-
-@router.put("/{partner_id}", response_model=None)
-def update_partner(partner_id: str, partner: BusinessPartner):
+    """
+    دریافت پروفایل کامل یک مخاطب / مشتری
+    """
 
     oid = object_id_or_400(partner_id)
-    existing = partners_collection.find_one({"_id": oid})
 
-    if not existing:
-        return api_error("Partner not found", "404")
+    repo = PartnerRepository()
+    partner = repo.get_by_id(str(oid))
 
-    update_data = partner.model_dump(exclude={"id"}, exclude_unset=True)
+    if not partner:
+        return api_error("Partner not found", 404)
 
-    # trim
-    for k, v in update_data.items():
-        if isinstance(v, str):
-            update_data[k] = v.strip()
-
-    partners_collection.update_one({"_id": oid}, {"$set": update_data})
-
-    updated = partners_collection.find_one({"_id": oid})
-    return api_success(bp_from_mongo(updated), "Updated")
+    return api_success(partner)
 
 
-# ---------------------
-# DELETE
-# ---------------------
-
-@router.delete("/{partner_id}", response_model=None)
-def delete_partner(partner_id: str):
+# --------------------------------------------------
+# Generic update helper
+# --------------------------------------------------
+def update_nested_field(
+    partner_id: str,
+    payload,
+    prefix: str,
+    success_message: str
+):
     oid = object_id_or_400(partner_id)
-    result = partners_collection.delete_one({"_id": oid})
 
-    if result.deleted_count == 0:
-        return api_error("Partner not found", "404")
+    update_data = {
+        f"{prefix}.{field}": value
+        for field, value in payload.model_dump(exclude_unset=True).items()
+    }
 
-    return api_success(True, "Deleted")
+    if not update_data:
+        return api_error("No data provided for update", 400)
 
-# ---------------------
-# FULL TEXT SEARCH + PAGINATION
-# ---------------------
+    repo = PartnerRepository()
+    updated = repo.update(str(oid), update_data)
 
-# اگر /search بدون / آمد → ریدایرکت شود به /search/
-@router.get("/search", include_in_schema=False)
-def redirect_search(
-    q: Optional[str] = None,
-    business_type: Optional[str] = None,
-    funnel_stage: Optional[str] = None,
-    customer_level: Optional[str] = None,
+    if not updated:
+        return api_error("Partner not found", 404)
+
+    return api_success(updated, success_message)
+
+
+# --------------------------------------------------
+# Relationship
+# --------------------------------------------------
+@router.patch("/{partner_id}/relationship")
+def update_relationship(
+    partner_id: str,
+    payload: PartnerRelationshipUpdate
+):
+    """
+    بروزرسانی وضعیت ارتباط انسانی با مخاطب
+    """
+    return update_nested_field(
+        partner_id,
+        payload,
+        prefix="relationship",
+        success_message="Relationship updated"
+    )
+
+
+# --------------------------------------------------
+# Analysis
+# --------------------------------------------------
+@router.patch("/{partner_id}/analysis")
+def update_analysis(
+    partner_id: str,
+    payload: PartnerAnalysisUpdate
+):
+    """
+    بروزرسانی وضعیت تحلیلی (Upgrade لید / سگمنت‌بندی)
+    """
+    return update_nested_field(
+        partner_id,
+        payload,
+        prefix="analysis",
+        success_message="Analysis updated"
+    )
+
+
+# --------------------------------------------------
+# Financial Estimation
+# --------------------------------------------------
+@router.patch("/{partner_id}/financial-estimation")
+def update_financial_estimation(
+    partner_id: str,
+    payload: PartnerFinancialEstimationUpdate
+):
+    """
+    بروزرسانی اطلاعات مالی تخمینی
+    """
+    return update_nested_field(
+        partner_id,
+        payload,
+        prefix="financial_estimation",
+        success_message="Financial estimation updated"
+    )
+
+
+# --------------------------------------------------
+# Acquisition
+# --------------------------------------------------
+@router.patch("/{partner_id}/acquisition")
+def update_acquisition(
+    partner_id: str,
+    payload: PartnerAcquisitionUpdate
+):
+    """
+    بروزرسانی منبع آشنایی مخاطب
+    """
+    return update_nested_field(
+        partner_id,
+        payload,
+        prefix="acquisition",
+        success_message="Acquisition updated"
+    )
+
+
+# --------------------------------------------------
+# List & Search
+# --------------------------------------------------
+@router.get("")
+def list_partners(
+    funnel_stage: str | None = Query(None),
+    business_type: str | None = Query(None),
+    financial_level: str | None = Query(None),
+    purchase_readiness: str | None = Query(None),
+    potential_level: str | None = Query(None),
+    acquisition_source: str | None = Query(None),
+    province: str | None = Query(None),
+    city: str | None = Query(None),
+    tag: str | None = Query(None),
     page: int = 1,
-    limit: int = 20
+    limit: int = 20,
 ):
-    from fastapi.responses import RedirectResponse
+    """
+    لیست و جستجوی مخاطبین / مشتریان
+    """
 
-    params = []
-    if q: params.append(f"q={q}")
-    if business_type: params.append(f"business_type={business_type}")
-    if funnel_stage: params.append(f"funnel_stage={funnel_stage}")
-    if customer_level: params.append(f"customer_level={customer_level}")
-    params.append(f"page={page}")
-    params.append(f"limit={limit}")
-
-    qs = "&".join(params)
-    return RedirectResponse(f"/crm-api/partners/search/?{qs}", status_code=307)
-
-
-@router.get("/search/", response_model=None)
-def search_partners(
-    q: Optional[str] = None,
-    business_type: Optional[str] = None,
-    funnel_stage: Optional[str] = None,
-    customer_level: Optional[str] = None,
-    page: int = Query(1, ge=1),
-    limit: int = Query(20, ge=1, le=100)
-):
-    query = {}
-
-    if q:
-        query["$text"] = {"$search": q.strip()}
-
-    if business_type:
-        query["business_type"] = business_type
+    filters = {
+        "meta.is_deleted": False
+    }
 
     if funnel_stage:
-        query["funnel_stage"] = funnel_stage
+        filters["analysis.funnel_stage"] = funnel_stage
+    if business_type:
+        filters["identity.business_type"] = business_type
+    if financial_level:
+        filters["analysis.financial_level"] = financial_level
+    if purchase_readiness:
+        filters["analysis.purchase_readiness"] = purchase_readiness
+    if potential_level:
+        filters["analysis.potential_level"] = potential_level
+    if acquisition_source:
+        filters["acquisition.source"] = acquisition_source
+    if province:
+        filters["identity.province"] = province
+    if city:
+        filters["identity.city"] = city
+    if tag:
+        filters["analysis.tags"] = tag
 
-    if customer_level:
-        query["customer_level"] = customer_level
+    repo = PartnerRepository()
+    partners, total = repo.list(filters, page, limit)
 
-    skip = (page - 1) * limit
-    total = partners_collection.count_documents(query)
-
-    # fulltext score ranking
-    if q:
-        cursor = partners_collection.find(query, {"score": {"$meta": "textScore"}})
-        cursor = cursor.sort([("score", {"$meta": "textScore"})])
-    else:
-        cursor = partners_collection.find(query)
-
-    cursor = cursor.skip(skip).limit(limit)
-
-    partners = [bp_from_mongo(d) for d in cursor]
     pagination = build_pagination(page, limit, total)
 
-    return api_success(partners, "Search results", pagination=pagination)
+    return api_success(partners, pagination=pagination)
+
+
+# --------------------------------------------------
+# Soft Delete
+# --------------------------------------------------
+@router.delete("/{partner_id}")
+def delete_partner(partner_id: str):
+    """
+    حذف مخاطب (Soft Delete)
+    """
+
+    oid = object_id_or_400(partner_id)
+
+    repo = PartnerRepository()
+    success = repo.soft_delete(str(oid))
+
+    if not success:
+        return api_error("Partner not found or already deleted", 404)
+
+    return api_success(None, "Partner deleted successfully")
+
+
+from app.schemas.partner_identity import PartnerIdentityUpdate
+
+
+@router.patch("/{partner_id}/identity")
+def update_identity(partner_id: str, payload: PartnerIdentityUpdate):
+    """
+    بروزرسانی اطلاعات هویتی پایه مخاطب
+    """
+
+    oid = object_id_or_400(partner_id)
+
+    update_data = {}
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        update_data[f"identity.{field}"] = value
+
+    if not update_data:
+        return api_error("No data provided for update")
+
+    repo = PartnerRepository()
+    updated = repo.update(str(oid), update_data)
+
+    if not updated:
+        return api_error("Partner not found", 404)
+
+    return api_success(updated, "Identity updated")
+

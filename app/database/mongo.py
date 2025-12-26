@@ -1,78 +1,82 @@
-from pymongo import MongoClient, ASCENDING, TEXT
-from pymongo.errors import OperationFailure
+from pymongo import MongoClient, ASCENDING
+from pymongo.collection import Collection
+from pymongo.database import Database
+import os
+import logging
 
-MONGO_URI = "mongodb://localhost:27017"
 
-client = MongoClient(MONGO_URI)
-db = client["crm_db"]
+# =====================================
+# MongoDB Configuration
+# =====================================
 
-partners_collection = db["business_partners"]
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "crm_db")
 
+
+# =====================================
+# Mongo Client (Singleton)
+# =====================================
+
+_client: MongoClient | None = None
+_db: Database | None = None
+
+
+def get_mongo_client() -> MongoClient:
+    """
+    گرفتن یا ساخت singleton MongoClient
+    """
+    global _client
+
+    if _client is None:
+        _client = MongoClient(MONGO_URI)
+        logging.info("MongoDB client initialized")
+
+    return _client
+
+
+def get_database() -> Database:
+    """
+    گرفتن دیتابیس اصلی
+    """
+    global _db
+
+    if _db is None:
+        client = get_mongo_client()
+        _db = client[MONGO_DB_NAME]
+        logging.info(f"Connected to MongoDB database: {MONGO_DB_NAME}")
+
+    return _db
+
+
+# =====================================
+# Collections
+# =====================================
+
+def get_partners_collection() -> Collection:
+    """
+    کالکشن اصلی مخاطبین / مشتریان
+    """
+    db = get_database()
+    return db["partners"]
+
+
+# =====================================
+# Indexes (Call once on startup)
+# =====================================
 
 def ensure_indexes():
     """
-    ایجاد ایندکس‌ها در صورت عدم وجود.
-    اگر از قبل ساخته شده باشند، دوباره ساخته نمی‌شوند.
+    ساخت ایندکس‌های ضروری برای performance
+    این تابع فقط یک‌بار هنگام startup صدا زده شود
     """
+    collection = get_partners_collection()
 
-    existing_indexes = {idx["name"] for idx in partners_collection.list_indexes()}
+    collection.create_index([("analysis.funnel_stage", ASCENDING)])
+    collection.create_index([("identity.business_type", ASCENDING)])
+    collection.create_index([("analysis.customer_level", ASCENDING)])
+    collection.create_index([("analysis.potential_level", ASCENDING)])
+    collection.create_index([("acquisition.source", ASCENDING)])
+    collection.create_index([("identity.city", ASCENDING)])
+    collection.create_index([("meta.created_at", ASCENDING)])
 
-    # ایندکس فول‌تکست
-    if "text_search_index" not in existing_indexes:
-        try:
-            partners_collection.create_index(
-                [
-                    ("brand_name", TEXT),
-                    ("manager_full_name", TEXT),
-                    ("tags", TEXT),
-                    ("category", TEXT),
-                    ("sub_category", TEXT),
-                    ("notes", TEXT),
-                    ("customer_type", TEXT),
-                ],
-                name="text_search_index",
-                # MongoDB زبان "persian" ندارد؛
-                # برای فارسی معمولاً بهتر است از "none" استفاده کنیم.
-                default_language="none",
-            )
-        except OperationFailure as e:
-            # اگر به هر دلیلی باز هم خطا داد، لاگ کن و ادامه بده
-            print("Failed to create text index:", e)
-
-    # ایندکس‌های ساده روی فیلدهای مهم برای فیلتر کردن
-
-    if "business_type_index" not in existing_indexes:
-        partners_collection.create_index(
-            [("business_type", ASCENDING)],
-            name="business_type_index",
-        )
-
-    if "customer_level_index" not in existing_indexes:
-        partners_collection.create_index(
-            [("customer_level", ASCENDING)],
-            name="customer_level_index",
-        )
-
-    if "funnel_stage_index" not in existing_indexes:
-        partners_collection.create_index(
-            [("funnel_stage", ASCENDING)],
-            name="funnel_stage_index",
-        )
-
-    if "credit_status_index" not in existing_indexes:
-        partners_collection.create_index(
-            [("credit_status", ASCENDING)],
-            name="credit_status_index",
-        )
-
-    if "purchase_probability_index" not in existing_indexes:
-        partners_collection.create_index(
-            [("purchase_probability", ASCENDING)],
-            name="purchase_probability_index",
-        )
-
-    print("✅ MongoDB indexes ensured.")
-
-
-# اجرای ایندکس‌ها هنگام import
-ensure_indexes()
+    logging.info("MongoDB indexes ensured")
