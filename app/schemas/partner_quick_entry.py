@@ -19,6 +19,7 @@ class PartnerQuickEntry(BaseModel):
 
     province: Optional[str] = None
     city: Optional[str] = None
+    map_link: Optional[str] = None
     location: Optional[GeoLocation] = None
 
     notes: Optional[str] = None

@@ -193,6 +193,7 @@ def list_partners(
     acquisition_source: str | None = Query(None),
     province: str | None = Query(None),
     city: str | None = Query(None),
+    map_link: str | None = Query(None),
     tag: str | None = Query(None),
     page: int = 1,
     limit: int = 20,
@@ -221,6 +222,8 @@ def list_partners(
         filters["identity.province"] = province
     if city:
         filters["identity.city"] = city
+    if map_link:
+        filters["identity.map_link"] = map_link
     if tag:
         filters["analysis.tags"] = tag
 

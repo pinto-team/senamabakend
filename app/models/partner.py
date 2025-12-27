@@ -135,6 +135,7 @@ class Identity(BaseModel):
 
     province: Optional[str] = None
     city: Optional[str] = None
+    map_link: Optional[str] = None
     full_address: Optional[str] = None
 
     location: Optional[GeoLocation] = None
@@ -161,6 +162,7 @@ class PartnerIdentityUpdate(BaseModel):
 
     province: Optional[str] = None
     city: Optional[str] = None
+    map_link: Optional[str] = None
     full_address: Optional[str] = None
 
     location: Optional[GeoLocation] = None
